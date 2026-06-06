@@ -43,22 +43,27 @@ def update_firing(db: Session, firing_id: int, firing: FiringUpdate) -> Optional
         db.refresh(db_firing)
     return db_firing
 
-def has_open_orders(db: Session, firing_id: int) -> bool:
-    return db.query(WorkOrder).filter(
+def has_open_orders(db: Session, firing_id: int, lock: bool = False) -> bool:
+    query = db.query(WorkOrder).filter(
         WorkOrder.firing_id == firing_id,
-        WorkOrder.order_type == 'rework',
         WorkOrder.status != 'closed'
-    ).first() is not None
+    )
+    if lock:
+        query = query.with_for_update()
+    return query.first() is not None
 
-def can_load_batch(db: Session, batch_id: int) -> Tuple[bool, str]:
-    batch = db.query(BrickBatch).filter(BrickBatch.id == batch_id).first()
+def can_load_batch(db: Session, batch_id: int, lock: bool = False) -> Tuple[bool, str]:
+    query = db.query(BrickBatch).filter(BrickBatch.id == batch_id)
+    if lock:
+        query = query.with_for_update()
+    batch = query.first()
     if not batch:
         return False, "批次不存在"
     if batch.status in ('loaded', 'shipped'):
         return False, f"批次已{batch.status}"
-    if batch.status == 'rework_done':
-        return True, "可以装车"
-    if has_open_orders(db, batch.firing_id):
+    if batch.status == 'rework_pending':
+        return False, "该批次待返工，禁止装车"
+    if has_open_orders(db, batch.firing_id, lock=lock):
         return False, "该窑次存在未关闭工单，禁止装车"
     return True, "可以装车"
 
@@ -155,8 +160,11 @@ def create_work_order(db: Session, order: WorkOrderCreate) -> WorkOrder:
     return db_order
 
 def update_work_order(db: Session, order_id: int, order: WorkOrderUpdate) -> Optional[WorkOrder]:
-    db_order = get_work_order(db, order_id)
-    if db_order:
+    try:
+        db_order = db.query(WorkOrder).filter(WorkOrder.id == order_id).with_for_update().first()
+        if not db_order:
+            return None
+        
         update_data = order.model_dump(exclude_unset=True)
         for key, value in update_data.items():
             setattr(db_order, key, value)
@@ -165,36 +173,36 @@ def update_work_order(db: Session, order_id: int, order: WorkOrderUpdate) -> Opt
         db.commit()
         db.refresh(db_order)
         
-        if order.status == 'closed' and db_order.order_type == 'flue_collapse':
-            pending_batches = db.query(BrickBatch).filter(
-                BrickBatch.firing_id == db_order.firing_id,
-                BrickBatch.status == 'rework_pending'
-            ).all()
-            for batch in pending_batches:
-                batch.status = 'produced'
-            db.commit()
-        elif order.status == 'closed' and db_order.order_type == 'rework' and db_order.batch_id:
-            batch = db.query(BrickBatch).filter(BrickBatch.id == db_order.batch_id).first()
+        if order.status == 'closed' and db_order.order_type == 'rework' and db_order.batch_id:
+            batch = db.query(BrickBatch).filter(BrickBatch.id == db_order.batch_id).with_for_update().first()
             if batch and batch.status == 'rework_pending':
                 batch.status = 'rework_done'
                 db.commit()
-    return db_order
+        return db_order
+    except Exception as e:
+        db.rollback()
+        raise e
 
 def create_loading_record(db: Session, loading: LoadingRecordCreate) -> Tuple[Optional[LoadingRecord], str]:
-    can_load, message = can_load_batch(db, loading.batch_id)
-    if not can_load:
-        return None, message
-    
-    db_loading = LoadingRecord(**loading.model_dump())
-    db.add(db_loading)
-    
-    batch = db.query(BrickBatch).filter(BrickBatch.id == loading.batch_id).first()
-    if batch:
-        batch.status = 'loaded'
-    
-    db.commit()
-    db.refresh(db_loading)
-    return db_loading, "装车成功"
+    try:
+        can_load, message = can_load_batch(db, loading.batch_id, lock=True)
+        if not can_load:
+            db.rollback()
+            return None, message
+        
+        db_loading = LoadingRecord(**loading.model_dump())
+        db.add(db_loading)
+        
+        batch = db.query(BrickBatch).filter(BrickBatch.id == loading.batch_id).with_for_update().first()
+        if batch:
+            batch.status = 'loaded'
+        
+        db.commit()
+        db.refresh(db_loading)
+        return db_loading, "装车成功"
+    except Exception as e:
+        db.rollback()
+        return None, f"装车失败：{str(e)}"
 
 def get_loading_records(db: Session, skip: int = 0, limit: int = 100) -> List[LoadingRecord]:
     return db.query(LoadingRecord).order_by(LoadingRecord.loading_time.desc()).offset(skip).limit(limit).all()

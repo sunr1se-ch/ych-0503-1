@@ -146,8 +146,6 @@ const submitting = ref(false)
 const batches = ref([])
 const loadingRecords = ref([])
 
-let batchesCache = null
-
 const form = reactive({
   batch_id: null,
   vehicle_plate: '',
@@ -181,7 +179,6 @@ const canSubmit = computed(() => {
   }
   const batch = selectedBatch.value
   if (!batch) return false
-  if (batch.status === 'rework_done') return true
   return batch.can_load
 })
 
@@ -200,14 +197,9 @@ const getBatchCode = (batchId) => {
   return batch ? batch.batch_code : `#${batchId}`
 }
 
-const loadBatches = async (force = false) => {
-  if (batchesCache && !force) {
-    batches.value = batchesCache
-    return
-  }
+const loadBatches = async () => {
   try {
     const res = await batchApi.list()
-    batchesCache = res.data
     batches.value = res.data
   } catch (e) {
     ElMessage.error('加载批次列表失败')
@@ -244,8 +236,7 @@ const submitLoading = async () => {
     form.operator = ''
     form.quantity = 1
     form.remarks = ''
-    batchesCache = null
-    loadBatches(true)
+    loadBatches()
     loadRecords()
   } catch (e) {
     ElMessage.error('装车失败：' + (e.response?.data?.detail || e.message))
