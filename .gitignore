@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Node / Frontend
+node_modules/
+frontend/dist/
+.npm
+*.log
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Docker / runtime data
+data/
+
+# Nim toolchain & build artifacts (local dev only)
+.nimble/
+bin/
+nimcache_*/
+nim-2.2.10/
+mingw64/
+*.zip
+
+# Database
+*.db
+*.sqlite3
