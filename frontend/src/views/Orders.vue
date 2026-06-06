@@ -3,6 +3,10 @@
     <div class="page-header">
       <h2><el-icon><Warning /></el-icon> 工单待办</h2>
       <div class="header-actions">
+        <el-tag v-if="filterFiringId" closable @close="clearFiringFilter" type="primary" effect="light" style="margin-right: 10px;">
+          窑次 #{{ filterFiringId }}
+          <el-icon><Close /></el-icon>
+        </el-tag>
         <el-select v-model="filterStatus" placeholder="按状态筛选" style="width: 140px; margin-right: 10px;">
           <el-option label="全部" value="" />
           <el-option label="待处理" value="open" />
@@ -52,7 +56,13 @@
     </el-row>
 
     <el-card>
-      <el-table :data="orders" v-loading="loading" stripe>
+      <el-table 
+        :data="filteredOrders" 
+        v-loading="loading" 
+        stripe 
+        ref="ordersTableRef"
+        highlight-current-row
+      >
         <el-table-column prop="id" label="工单号" width="90">
           <template #default="{ row }">#{{ row.id }}</template>
         </el-table-column>
@@ -133,7 +143,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { orderApi, scanApi } from '../api'
@@ -145,16 +155,33 @@ const loading = ref(false)
 const submitting = ref(false)
 const orders = ref([])
 const filterStatus = ref('')
+const filterFiringId = ref(null)
+const filterOrderId = ref(null)
+const ordersTableRef = ref(null)
 const closeDialogVisible = ref(false)
 const currentOrder = ref(null)
 const closeForm = reactive({
   closed_by: ''
 })
 
+const filteredOrders = computed(() => {
+  let result = [...orders.value]
+  
+  if (filterStatus.value) {
+    result = result.filter(o => o.status === filterStatus.value)
+  }
+  
+  if (filterFiringId.value) {
+    result = result.filter(o => o.firing_id === Number(filterFiringId.value))
+  }
+  
+  return result
+})
+
 const stats = computed(() => ({
-  open: orders.value.filter(o => o.status === 'open').length,
-  inProgress: orders.value.filter(o => o.status === 'in_progress').length,
-  closed: orders.value.filter(o => o.status === 'closed').length
+  open: filteredOrders.value.filter(o => o.status === 'open').length,
+  inProgress: filteredOrders.value.filter(o => o.status === 'in_progress').length,
+  closed: filteredOrders.value.filter(o => o.status === 'closed').length
 }))
 
 const orderStatusType = (status) => {
@@ -176,10 +203,28 @@ const loadOrders = async () => {
   try {
     const res = await orderApi.list(filterStatus.value || undefined)
     orders.value = res.data
+    nextTick(() => {
+      locateTargetOrder()
+    })
   } catch (e) {
     ElMessage.error('加载工单列表失败')
   } finally {
     loading.value = false
+  }
+}
+
+const clearFiringFilter = () => {
+  filterFiringId.value = null
+  filterOrderId.value = null
+}
+
+const locateTargetOrder = () => {
+  if (!filterOrderId.value || !ordersTableRef.value) return
+  
+  const targetOrder = filteredOrders.value.find(o => o.id === Number(filterOrderId.value))
+  if (targetOrder) {
+    ordersTableRef.value.setCurrentRow(targetOrder)
+    ordersTableRef.value.scrollToRow(targetOrder)
   }
 }
 
@@ -240,11 +285,21 @@ watch(filterStatus, () => {
   loadOrders()
 })
 
+watch(filteredOrders, () => {
+  nextTick(() => {
+    locateTargetOrder()
+  })
+})
+
 onMounted(() => {
-  loadOrders()
   if (route.query.firingId) {
+    filterFiringId.value = route.query.firingId
     filterStatus.value = ''
   }
+  if (route.query.orderId) {
+    filterOrderId.value = route.query.orderId
+  }
+  loadOrders()
 })
 </script>
 
@@ -307,5 +362,19 @@ onMounted(() => {
   font-size: 14px;
   color: #909399;
   margin-top: 4px;
+}
+
+:deep(.el-table__row.current-row) {
+  background-color: #ecf5ff !important;
+}
+
+:deep(.el-table__row.current-row > td) {
+  background-color: #ecf5ff !important;
+}
+
+.filter-tag {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 </style>

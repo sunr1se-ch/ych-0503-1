@@ -39,7 +39,11 @@
     </el-card>
 
     <el-tabs v-model="activeTab" class="detail-tabs">
-      <el-tab-pane label="五段温压曲线" name="chart">
+      <el-tab-pane name="chart">
+        <template #label>
+          <span>五段温压曲线</span>
+          <el-badge v-if="openOrdersCount > 0" :value="openOrdersCount" class="tab-badge" :max="99" />
+        </template>
         <el-card>
           <div class="chart-toolbar">
             <el-button-group>
@@ -54,6 +58,14 @@
               <span v-for="seg in 5" :key="seg" class="legend-item">
                 <span class="legend-color" :style="{ background: segmentColors[seg-1] }"></span>
                 第{{ seg }}段
+              </span>
+              <span class="legend-item">
+                <span class="legend-color" style="background: rgba(255, 193, 7, 0.3); border: 1px dashed #ff9800;"></span>
+                塌陷事件
+              </span>
+              <span class="legend-item">
+                <span class="legend-color" style="background: #2196f3; width: 2px;"></span>
+                计划到温
               </span>
             </div>
           </div>
@@ -98,7 +110,11 @@
         </el-card>
       </el-tab-pane>
 
-      <el-tab-pane label="烟道塌陷事件" name="events">
+      <el-tab-pane name="events">
+        <template #label>
+          <span>烟道塌陷事件</span>
+          <el-badge v-if="flueEventsCount > 0" :value="flueEventsCount" class="tab-badge" type="warning" :max="99" />
+        </template>
         <el-card>
           <el-alert 
             v-if="firing?.flue_events?.length > 0"
@@ -107,7 +123,13 @@
             show-icon
             style="margin-bottom: 15px;"
           />
-          <el-table :data="firing?.flue_events || []" stripe>
+          <el-table 
+            :data="firing?.flue_events || []" 
+            stripe 
+            ref="eventsTableRef"
+            highlight-current-row
+            @row-click="onEventRowClick"
+          >
             <el-table-column prop="segment" label="段位" width="100">
               <template #default="{ row }">第{{ row.segment }}段</template>
             </el-table-column>
@@ -118,7 +140,7 @@
             <el-table-column prop="duration_minutes" label="持续时间(分钟)" width="150" />
             <el-table-column prop="work_order_id" label="关联工单" width="120">
               <template #default="{ row }">
-                <el-link v-if="row.work_order_id" type="primary" @click="activeTab = 'orders'">
+                <el-link v-if="row.work_order_id" type="primary" @click.stop="goToOrder(row.work_order_id)">
                   #{{ row.work_order_id }}
                 </el-link>
                 <span v-else>-</span>
@@ -128,11 +150,17 @@
         </el-card>
       </el-tab-pane>
 
-      <el-tab-pane label="工单" name="orders">
+      <el-tab-pane name="orders">
+        <template #label>
+          <span>工单</span>
+          <el-badge v-if="openOrdersCount > 0" :value="openOrdersCount" class="tab-badge" type="danger" :max="99" />
+        </template>
         <el-card>
           <el-table :data="firing?.orders || []" stripe>
             <el-table-column prop="id" label="工单号" width="100">
-              <template #default="{ row }">#{{ row.id }}</template>
+              <template #default="{ row }">
+                <el-link type="primary" @click="goToOrder(row.id)">#{{ row.id }}</el-link>
+              </template>
             </el-table-column>
             <el-table-column prop="order_type" label="类型" width="140">
               <template #default="{ row }">
@@ -180,7 +208,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, watch, nextTick } from 'vue'
+import { ref, reactive, onMounted, watch, nextTick, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { firingApi, batchApi } from '../api'
@@ -196,7 +224,12 @@ const firing = ref(null)
 const activeTab = ref('chart')
 const chartType = ref('temp')
 const chartRef = ref(null)
+const eventsTableRef = ref(null)
 let chartInstance = null
+let highlightTimer = null
+
+const highlightedEventId = ref(null)
+const highlightedSegment = ref(null)
 
 const addBatchVisible = ref(false)
 const batchForm = reactive({
@@ -206,6 +239,15 @@ const batchForm = reactive({
 })
 
 const segmentColors = ['#e74c3c', '#e67e22', '#f1c40f', '#2ecc71', '#3498db']
+
+const openOrdersCount = computed(() => {
+  if (!firing.value?.orders) return 0
+  return firing.value.orders.filter(o => o.status !== 'closed').length
+})
+
+const flueEventsCount = computed(() => {
+  return firing.value?.flue_events?.length || 0
+})
 
 const statusType = (status) => {
   const map = { loading: 'info', firing: 'warning', cooling: 'primary', completed: 'success' }
@@ -259,10 +301,85 @@ const formatTime = (time) => {
   return time ? dayjs(time).format('YYYY-MM-DD HH:mm') : '-'
 }
 
-const initChart = () => {
+const buildFlueEventMarkAreas = () => {
+  if (!firing.value?.flue_events) return []
+  
+  const markAreas = []
+  const segments = firing.value.segments || []
+  
+  firing.value.flue_events.forEach((event, eventIdx) => {
+    const segIdx = event.segment - 1
+    if (segIdx >= 0 && segIdx < segments.length) {
+      const startTime = dayjs(event.start_time).toDate()
+      const endTime = dayjs(event.start_time).add(event.duration_minutes, 'minute').toDate()
+      
+      const segData = segments[segIdx].timestamps.map((t, i) => {
+        const val = chartType.value === 'temp' ? segments[segIdx].temperatures[i] : segments[segIdx].pressures[i]
+        return [dayjs(t).toDate(), Number(val)]
+      })
+      
+      const segMin = Math.min(...segData.map(d => d[1]))
+      const segMax = Math.max(...segData.map(d => d[1]))
+      
+      markAreas.push({
+        name: `烟道塌陷-${eventIdx}`,
+        silent: false,
+        itemStyle: {
+          color: 'rgba(255, 193, 7, 0.25)',
+          borderColor: '#ff9800',
+          borderWidth: 1,
+          borderType: 'dashed'
+        },
+        data: [
+          [
+            {
+              xAxis: startTime,
+              yAxis: segMin - (segMax - segMin) * 0.1
+            },
+            {
+              xAxis: endTime,
+              yAxis: segMax + (segMax - segMin) * 0.1
+            }
+          ]
+        ]
+      })
+    }
+  })
+  
+  return markAreas
+}
+
+const buildPlanTempMarkLine = () => {
+  if (!firing.value?.plan_temp_time) return []
+  
+  return {
+    silent: true,
+    symbol: 'none',
+    lineStyle: {
+      color: '#2196f3',
+      width: 2,
+      type: 'solid'
+    },
+    label: {
+      show: true,
+      formatter: '计划到温',
+      position: 'end',
+      color: '#2196f3',
+      fontSize: 12
+    },
+    data: [
+      {
+        xAxis: dayjs(firing.value.plan_temp_time).toDate()
+      }
+    ]
+  }
+}
+
+const initChart = (zoomRange = null) => {
   if (!chartRef.value || !firing.value) return
   
   if (chartInstance) {
+    chartInstance.off('click')
     chartInstance.dispose()
   }
   
@@ -270,6 +387,7 @@ const initChart = () => {
   
   const series = []
   const segments = firing.value.segments || []
+  const flueEvents = firing.value.flue_events || []
   
   segments.forEach((seg, idx) => {
     const data = seg.timestamps.map((t, i) => {
@@ -277,17 +395,36 @@ const initChart = () => {
       return [dayjs(t).toDate(), Number(val)]
     })
     
+    const isHighlighted = highlightedSegment.value === seg.segment
+    
     series.push({
       name: `第${seg.segment}段`,
       type: 'line',
       smooth: true,
       symbol: 'circle',
-      symbolSize: 4,
-      lineStyle: { width: 2 },
-      itemStyle: { color: segmentColors[idx] },
-      data: data
+      symbolSize: isHighlighted ? 8 : 4,
+      lineStyle: { 
+        width: isHighlighted ? 5 : 2,
+        shadowBlur: isHighlighted ? 20 : 0,
+        shadowColor: isHighlighted ? segmentColors[idx] : 'transparent'
+      },
+      itemStyle: { 
+        color: segmentColors[idx]
+      },
+      data: data,
+      markArea: idx === 0 ? buildFlueEventMarkAreas() : undefined,
+      markLine: idx === 0 ? buildPlanTempMarkLine() : undefined,
+      z: isHighlighted ? 10 : 2
     })
   })
+  
+  const dataZoomConfig = zoomRange ? [
+    { type: 'inside', start: zoomRange.start, end: zoomRange.end },
+    { start: zoomRange.start, end: zoomRange.end, bottom: 20 }
+  ] : [
+    { type: 'inside', start: 0, end: 100 },
+    { start: 0, end: 100, bottom: 20 }
+  ]
   
   const option = {
     tooltip: {
@@ -295,7 +432,9 @@ const initChart = () => {
       formatter: (params) => {
         let html = dayjs(params[0].axisValue).format('YYYY-MM-DD HH:mm') + '<br/>'
         params.forEach(p => {
-          html += `${p.marker} ${p.seriesName}: ${p.data[1].toFixed(1)} ${chartType.value === 'temp' ? '°C' : 'Pa'}<br/>`
+          if (p.componentType === 'series') {
+            html += `${p.marker} ${p.seriesName}: ${p.data[1].toFixed(1)} ${chartType.value === 'temp' ? '°C' : 'Pa'}<br/>`
+          }
         })
         return html
       }
@@ -324,14 +463,87 @@ const initChart = () => {
         formatter: (value) => value.toFixed(0)
       }
     },
-    dataZoom: [
-      { type: 'inside', start: 0, end: 100 },
-      { start: 0, end: 100, bottom: 20 }
-    ],
+    dataZoom: dataZoomConfig,
     series: series
   }
   
   chartInstance.setOption(option)
+  
+  chartInstance.on('click', (params) => {
+    if (params.componentType === 'markArea') {
+      const eventName = params.name
+      if (eventName?.startsWith('烟道塌陷-')) {
+        const eventIdx = parseInt(eventName.split('-')[1])
+        if (!isNaN(eventIdx) && flueEvents[eventIdx]) {
+          jumpToEvent(eventIdx)
+        }
+      }
+    }
+  })
+  
+  chartInstance.on('dataZoom', () => {
+    if (highlightedSegment.value !== null) {
+      highlightedSegment.value = null
+      nextTick(() => initChart())
+    }
+  })
+}
+
+const jumpToEvent = (eventIdx) => {
+  highlightedEventId.value = eventIdx
+  activeTab.value = 'events'
+  nextTick(() => {
+    if (eventsTableRef.value) {
+      eventsTableRef.value.setCurrentRow(firing.value.flue_events[eventIdx])
+    }
+  })
+}
+
+const onEventRowClick = (row) => {
+  const eventIdx = firing.value.flue_events.findIndex(e => e === row)
+  if (eventIdx === -1) return
+  
+  const startTime = dayjs(row.start_time)
+  const endTime = startTime.add(row.duration_minutes, 'minute')
+  
+  const segments = firing.value.segments || []
+  if (segments.length === 0) return
+  
+  const allTimestamps = []
+  segments.forEach(seg => {
+    seg.timestamps.forEach(t => allTimestamps.push(dayjs(t).toDate()))
+  })
+  
+  if (allTimestamps.length === 0) return
+  
+  const minTime = Math.min(...allTimestamps.map(t => t.getTime()))
+  const maxTime = Math.max(...allTimestamps.map(t => t.getTime()))
+  const totalRange = maxTime - minTime
+  
+  const zoomStartTime = startTime.subtract(15, 'minute').toDate().getTime()
+  const zoomEndTime = endTime.add(15, 'minute').toDate().getTime()
+  
+  const start = Math.max(0, ((zoomStartTime - minTime) / totalRange) * 100)
+  const end = Math.min(100, ((zoomEndTime - minTime) / totalRange) * 100)
+  
+  highlightedSegment.value = row.segment
+  activeTab.value = 'chart'
+  
+  nextTick(() => {
+    initChart({ start, end })
+    
+    if (highlightTimer) {
+      clearTimeout(highlightTimer)
+    }
+    highlightTimer = setTimeout(() => {
+      highlightedSegment.value = null
+      nextTick(() => initChart({ start, end }))
+    }, 3000)
+  })
+}
+
+const goToOrder = (orderId) => {
+  router.push(`/orders?firingId=${firing.value.id}&orderId=${orderId}`)
 }
 
 const loadFiringDetail = async () => {
@@ -383,7 +595,21 @@ const createBatch = async () => {
 }
 
 watch(chartType, () => {
+  highlightedSegment.value = null
   nextTick(() => initChart())
+})
+
+watch(activeTab, (newTab) => {
+  if (newTab === 'chart') {
+    highlightedEventId.value = null
+    nextTick(() => initChart())
+  } else if (newTab === 'events') {
+    if (highlightTimer) {
+      clearTimeout(highlightTimer)
+      highlightTimer = null
+    }
+    highlightedSegment.value = null
+  }
 })
 
 onMounted(() => {
@@ -434,6 +660,14 @@ onMounted(() => {
   margin-top: 20px;
 }
 
+.detail-tabs :deep(.el-tabs__item) {
+  position: relative;
+}
+
+.tab-badge {
+  margin-left: 6px;
+}
+
 .chart-toolbar {
   display: flex;
   justify-content: space-between;
@@ -444,6 +678,7 @@ onMounted(() => {
 .legend-info {
   display: flex;
   gap: 20px;
+  flex-wrap: wrap;
 }
 
 .legend-item {
@@ -463,5 +698,13 @@ onMounted(() => {
 .chart-container {
   width: 100%;
   height: 500px;
+}
+
+.detail-tabs :deep(.el-table__row.current-row) {
+  background-color: #fff7e6 !important;
+}
+
+.detail-tabs :deep(.el-table__row.current-row > td) {
+  background-color: #fff7e6 !important;
 }
 </style>
